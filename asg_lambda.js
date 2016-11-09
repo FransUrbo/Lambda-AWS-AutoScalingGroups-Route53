@@ -40,7 +40,8 @@ exports.handler = function (event, context) {
            var tokens = response.Tags[0].Value.split(':');
            var route53Tags = {
              HostedZoneId: tokens[0],
-             RecordName: tokens[1]
+             RecordName: tokens[1],
+             DomainName: tokens[2]
            };
            console.log(route53Tags);
            next(null, route53Tags);
@@ -68,13 +69,26 @@ exports.handler = function (event, context) {
            });
          },
          function updateDNS(route53Tags, ec2Response, next) {
-           console.log("Updating Route53 DNS");
+           if (!(route53Tags.DomainName === undefined)) {
+               record = route53Tags.RecordName + "." + route53Tags.DomainName;
+           } else {
+               record = route53Tags.RecordName;
+           }
+           console.log("Updating Route53 DNS (" + record + ")");
            var resource_records = ec2Response.Reservations.map(function(reservation) {
                console.log("ec2Response.Reservations.Instances[0]:");
                console.log(reservation.Instances[0]);
-               return {
-                 Value: reservation.Instances[0].PublicIpAddress
-               };
+               if (reservation.Instances[0].PublicIpAddress === undefined &&
+                   !(reservation.Instances[0].PrivateIpAddress === undefined))
+               {
+                   return {
+                       Value: reservation.Instances[0].PrivateIpAddress
+                   };
+               } else if (!(reservation.Instances[0].PublicIpAddress === undefined)) {
+                   return {
+                       Value: reservation.Instances[0].PrivateIpAddress
+                   };
+               }
            });
            console.log("Resource records:");
            console.log(resource_records);
@@ -84,7 +98,7 @@ exports.handler = function (event, context) {
                      {
                        Action: 'UPSERT',
                          ResourceRecordSet: {
-                           Name: route53Tags.RecordName,
+                           Name: record,
                            Type: 'A',
                            TTL: 10,
                            ResourceRecords: resource_records
