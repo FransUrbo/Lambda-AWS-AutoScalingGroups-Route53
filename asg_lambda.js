@@ -76,19 +76,14 @@ exports.handler = function (event, context) {
            }
            console.log("Updating Route53 DNS (" + record + ")");
            var resource_records = ec2Response.Reservations.map(function(reservation) {
-               console.log("ec2Response.Reservations.Instances[0]:");
-               console.log(reservation.Instances[0]);
-               if (reservation.Instances[0].PublicIpAddress === undefined &&
-                   !(reservation.Instances[0].PrivateIpAddress === undefined))
-               {
-                   return {
-                       Value: reservation.Instances[0].PrivateIpAddress
-                   };
-               } else if (!(reservation.Instances[0].PublicIpAddress === undefined)) {
-                   return {
-                       Value: reservation.Instances[0].PrivateIpAddress
-                   };
+               var instance = reservation.Instances[0];
+               return instance.PublicIpAddress ? {
+                   Value: instance.PublicIpAddress
+               } : {
+                   Value: instance.PrivateIpAddress
                }
+           }).filter(function(ip) {
+               return ip.Value !== undefined
            });
            console.log("Resource records:");
            console.log(resource_records);
