@@ -1,6 +1,18 @@
 var AWS = require('aws-sdk');
 var async = require('async');
 
+function normalizeIP(ip) {
+    return ip.split("\.").map(function(s) {
+        if (s.length == 1) {
+            return "00"+s
+        } else if (s.length == 2) {
+            return "0"+s
+        } else {
+            return s
+        }
+    });
+};
+
 exports.handler = function (event, context) {
   var asg_msg = JSON.parse(event.Records[0].Sns.Message);
   var asg_name = asg_msg.AutoScalingGroupName;
@@ -68,13 +80,7 @@ exports.handler = function (event, context) {
                next(err, route53Tags, data);
            });
          },
-         function updateDNS(route53Tags, ec2Response, next) {
-           if (!(route53Tags.DomainName === undefined)) {
-               record = route53Tags.RecordName + "." + route53Tags.DomainName;
-           } else {
-               record = route53Tags.RecordName;
-           }
-           console.log("Updating Route53 DNS (" + record + ")");
+         function setupIpAddresses(route53Tags, ec2Response, next) {
            var resource_records = ec2Response.Reservations.map(function(reservation) {
                var instance = reservation.Instances[0];
                return instance.PublicIpAddress ? {
@@ -85,6 +91,21 @@ exports.handler = function (event, context) {
            }).filter(function(ip) {
                return ip.Value !== undefined
            });
+           next(null, route53Tags, resource_records);
+         },
+         function normalizeIPs(route53Tags, resource_records, next) {
+             records = resource_records.sort(function(a,b) {
+                 return normalizeIP(a.Value) > normalizeIP(b.Value);
+             });
+             next(null, route53Tags, records);
+         },
+         function updateDNS(route53Tags, resource_records, next) {
+           if (!(route53Tags.DomainName === undefined)) {
+               record = route53Tags.RecordName + "." + route53Tags.DomainName;
+           } else {
+               record = route53Tags.RecordName;
+           }
+           console.log("Updating Route53 DNS (" + record + ")");
            console.log("Resource records:");
            console.log(resource_records);
            route53.changeResourceRecordSets({
