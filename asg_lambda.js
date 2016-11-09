@@ -16,18 +16,16 @@ exports.handler = function (event, context) {
 
     async.waterfall([
          function describeTags(next) {
-           console.log("Describing ASG Tags");
+           console.log("Retrieving ASG Tags");
            autoscaling.describeTags({
                Filters: [
                    {
                      Name: "auto-scaling-group",
-                       Values: [
-                           asg_name
-                       ]
+                     Values: [asg_name]
                    },
                    {
                      Name: "key",
-                       Values: ['DomainMeta']
+                     Values: ['DomainMeta']
                    }
                ],
                MaxRecords: 1
@@ -57,6 +55,7 @@ exports.handler = function (event, context) {
            });
          },
          function retrieveInstanceIds(route53Tags, asgResponse, next) {
+           console.log("Retrieving Instance IDs in ASG");
            console.log(asgResponse.AutoScalingGroups[0]);
            var instance_ids = asgResponse.AutoScalingGroups[0].Instances.map(function(instance) {
                return instance.InstanceId;
@@ -69,12 +68,15 @@ exports.handler = function (event, context) {
            });
          },
          function updateDNS(route53Tags, ec2Response, next) {
-           console.log(ec2Response.Reservations);
+           console.log("Updating Route53 DNS");
            var resource_records = ec2Response.Reservations.map(function(reservation) {
+               console.log("ec2Response.Reservations.Instances[0]:");
+               console.log(reservation.Instances[0]);
                return {
                  Value: reservation.Instances[0].PublicIpAddress
                };
            });
+           console.log("Resource records:");
            console.log(resource_records);
            route53.changeResourceRecordSets({
                ChangeBatch: {
@@ -82,7 +84,7 @@ exports.handler = function (event, context) {
                      {
                        Action: 'UPSERT',
                          ResourceRecordSet: {
-                         Name: route53Tags.RecordName,
+                           Name: route53Tags.RecordName,
                            Type: 'A',
                            TTL: 10,
                            ResourceRecords: resource_records
