@@ -36,8 +36,8 @@ exports.handler = function (event, context) {
          function processTags(response, next) {
            console.log("Processing ASG Tags");
            console.log(response.Tags);
-           if (response.Tags.length == 0) {
-             next("ASG: " + asg_name + " does not define Route53 DomainMeta tag.");
+           if (response.Tags.length === 0) {
+             return next("ASG: " + asg_name + " does not define Route53 DomainMeta tag.");
            }
            var tokens = response.Tags[0].Value.split(':');
            var route53Tags = {
@@ -59,7 +59,7 @@ exports.handler = function (event, context) {
          function retrieveInstanceIds(route53Tags, asgResponse, next) {
            console.log(asgResponse.AutoScalingGroups[0]);
            var instance_ids = asgResponse.AutoScalingGroups[0].Instances.map(function(instance) {
-               return instance.InstanceId
+               return instance.InstanceId;
            });
            ec2.describeInstances({
                DryRun: false,
@@ -72,7 +72,7 @@ exports.handler = function (event, context) {
            console.log(ec2Response.Reservations);
            var resource_records = ec2Response.Reservations.map(function(reservation) {
                return {
-                 Value: reservation.Instances[0].NetworkInterfaces[0].Association.PublicIp
+                 Value: reservation.Instances[0].PublicIpAddress
                };
            });
            console.log(resource_records);
@@ -100,7 +100,7 @@ exports.handler = function (event, context) {
             console.log("Successfully processed DNS updates for ASG event.");
          }
          context.done(err);
-    })
+    });
   } else {
     console.log("Unsupported ASG event: " + asg_name, asg_event);
     context.done("Unsupported ASG event: " + asg_name, asg_event);
