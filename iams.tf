@@ -10,7 +10,8 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_READ" {
       "Effect": "Allow",
       "Action": [
         "ec2:Describe*",
-        "autoscaling:Describe*"
+        "autoscaling:Describe*",
+        "dynamodb:Scan"
       ],
       "Resource": "*"
     }
@@ -65,6 +66,27 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_R53" {
   ]
 }
 ASG_NOTIFY_POLICY_WRITE_R53
+}
+
+resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_DYNAMODB" {
+  name                        = "ASGNotifyPolicy_WRITE_DYNAMODB"
+
+  role                        = "${aws_iam_role.ASGNotify.id}"
+  policy                      = <<ASG_NOTIFY_POLICY_WRITE_DYNAMODB
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem",
+        "dynamodb:UpdateItem"
+      ],
+      "Resource": "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/autoscaling_event_update_route53-*"
+    }
+  ]
+}
+ASG_NOTIFY_POLICY_WRITE_DYNAMODB
 }
 
 resource "aws_iam_role" "ASGNotify" {
