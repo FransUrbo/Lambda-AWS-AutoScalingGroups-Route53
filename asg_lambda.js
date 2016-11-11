@@ -100,9 +100,9 @@ exports.handler = function (event, context) {
            }
          },
          function retrieveInstanceIds(route53Tags, asgResponse, next) {
-           console.log("Retrieving Instance ID(s) in ASG");
            var instance_ids
            if (do_round_robin) {
+             console.log("Retrieving Instance ID(s) in ASG");
              console.log(JSON.stringify(asgResponse.AutoScalingGroups[0], null, 2));
              instance_ids = asgResponse.AutoScalingGroups[0].Instances.map(function(instance) {
                return instance.InstanceId;
@@ -147,8 +147,9 @@ exports.handler = function (event, context) {
              next(null, route53Tags, resource_records, reverse);
          },
          function retrieveHostedZones(route53Tags, resource_records, reverse_records, next) {
-             var hosted_zones = route53.listHostedZones({
-             }, function(err, data) {
+             console.log("Retrieving hosted zones");
+             var hosted_zones = route53.listHostedZones({}, function(err, data) {
+                 console.log(JSON.stringify(data, null, 2));
                  next(err, route53Tags, resource_records, reverse_records, data);
              });
          },
@@ -163,8 +164,47 @@ exports.handler = function (event, context) {
                      Name: zone.Name
                  };
              });
-             console.log("Zone IDs:");
+             next(null, route53Tags, resource_records, reverse_records, zone_ids);
+         },
+         function retrieveZoneRecords(route53Tags, resource_records, reverse_records, zone_ids, next) {
+             console.log("Retrieving zone records for the following zone(s) list");
              console.log(JSON.stringify(zone_ids, null, 2));
+             var promises = [];
+             for (var i = 0; i < zone_ids.length; i++) {
+                 var promise = route53.listResourceRecordSets({
+                     HostedZoneId: zone_ids[i].Id
+                 }).promise();
+                 promises.push(promise);
+             }
+             Promise.all(promises).then(recs => {
+                next(null, route53Tags, resource_records, reverse_records, zone_ids, recs);
+             }).catch(reason => {
+                console.log(reason);
+             });
+         },
+         function processZoneRecords(route53Tags, resource_records, reverse_records, zone_ids, zone_records, next) {
+             console.log("Processing zone records");
+             console.log(JSON.stringify(zone_records, null, 2));
+             var records = zone_records.map(function(record) {
+                 return {
+                     Zone: record.ResourceRecordSets[0].Name,
+                     Records: record.ResourceRecordSets.filter(function(rs) {
+                         return rs.Type == "A" || rs.Type == "PTR";
+                     }).map(function(r) {
+                         return {
+                             Name: r.Name,
+                             Type: r.Type,
+                             Values: r.ResourceRecords.map(function(rr) {
+                                 return rr.Value
+                             })
+                         }
+                     })
+                 }
+             }).filter(function(r) {
+                 return r.Records.length >0;
+             });
+             console.log("Records:");
+             console.log(JSON.stringify(records, null, 2));
              next(null, route53Tags, resource_records, reverse_records, zone_ids);
          },
          function matchReverseIpsWithReverseIds(route53Tags, resource_records, reverse_records, zone_ids, next) {
@@ -186,7 +226,7 @@ exports.handler = function (event, context) {
              next(null, route53Tags, resource_records, reverse_map[0]);
          },
          function setupDNSReverseChanges(route53Tags, resource_records, reverse_map, next) {
-             console.log("Reverse Map:");
+             console.log("Reverse map:");
              console.log(JSON.stringify(reverse_map, null, 2));
              for (var i = 0; i < Object.length; i++) {
                  var zone_id = Object.keys(reverse_map)[i];
