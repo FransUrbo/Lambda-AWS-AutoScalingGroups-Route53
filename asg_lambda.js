@@ -12,11 +12,11 @@ var do_debug = false;
  * Flow:
  * Get tags from ASG
  * Process tags retreived
- * Get all values from the DynamoDB table used for 'locking'
- * Get next available, free number from the DynamoDB values and allocate that as 'in use'
  * Get instances in ASG (if do_round_robin=true)
  * Get ID(s) of the instances retreived
  * Get IP(s) of the instances retreived
+ * Get all values from the DynamoDB table used for 'locking'
+ * Get next available, free number from the DynamoDB values and allocate that as 'in use'
  * Sort IP(s) retreived
  * Create reverse IP(s) of the IP(s) retreived
  * Get hosted zone(s) from R53
@@ -69,6 +69,13 @@ function findFirstAvailable(numbers) {
             return i;
 }
 
+function findRecordByIp(data, ip) {
+    var l = data.filter(function(d) {
+        return d.IPAddress.S == ip;
+    });
+    return l.length == 0 ? 0 : parseInt(l[0].HostNumber.N);
+}
+
 exports.handler = function (event, context) {
   var asg_msg = JSON.parse(event.Records[0].Sns.Message);
   var asg_name = asg_msg.AutoScalingGroupName;
@@ -116,57 +123,9 @@ exports.handler = function (event, context) {
            };
            next(null, instance);
          },
-         function retreiveHostNumbers(instance, next) {
-             if (do_individual_entries) {
-                 console.log("Route53 tags:");
-                 console.log(instance.route53Tags);
-                 var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
-                 console.log("DynamoDB table name: '" + table_name + "'");
-                 var existing = dynamoDB.scan({
-                     TableName: table_name
-                 }, function(err, data) {
-                     if (err) {
-                         console.log("Dynamo DB scan() returned an error:");
-                         console.log(JSON.stringify(err, null, 2));
-                     } else
-                         console.log(JSON.stringify(data, null, 2));
-                     next(err, instance, data);
-                 });
-             } else {
-                 next(err, instance, null);
-             }
-         },
-         function allocateHostNumber(instance, host_numbers, next) {
-             instance.NR = 1;
-             if (do_individual_entries) {
-                 if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH") {
-                     console.log("Host numbers:");
-                     console.log(JSON.stringify(host_numbers, null, 2));
-                     if (host_numbers.Count !== 0)
-                         instance.NR = findFirstAvailable(host_numbers);
-                     var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
-                     console.log("Allocating host number '" + instance.NR + "'");
-                     dynamoDB.putItem({
-                         TableName: table_name,
-                         Item: {
-                             HostNumber: { N: instance.NR + "" },
-                             IPAddress:  { S: "0" }
-                         }
-                     }, function(err, data) {
-                         if (err) {
-                             console.log("Dynamo DB putItem() returned an error:");
-                             console.log(JSON.stringify(err, null, 2));
-                         }
-                         next(null, instance);
-                     });
-                 } else {
-                     next(null, instance);
-                 }
-             } else {
-                 next(null, instance);
-             }
-         },
          function retrieveASGInstances(instance, next) {
+           console.log("Route53 tags:");
+           console.log(instance.route53Tags);
            if (do_round_robin) {
              console.log("Retrieving Instances in ASG");
              autoscaling.describeAutoScalingGroups({
@@ -218,22 +177,65 @@ exports.handler = function (event, context) {
            console.log(JSON.stringify(resource_records, null, 2));
            next(null, instance, resource_records);
          },
+         function retreiveHostNumbers(instance, resource_records, next) {
+             console.log("Instance information");
+             console.log(JSON.stringify(instance, null, 2));
+             if (do_individual_entries) {
+                 var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
+                 console.log("Retrieving information from the DynamoDB table '" + table_name + "'");
+                 var existing = dynamoDB.scan({
+                     TableName: table_name
+                 }, function(err, data) {
+                     if (err) {
+                         console.log("Dynamo DB scan() returned an error:");
+                         console.log(JSON.stringify(err, null, 2));
+                     } else
+                         console.log(JSON.stringify(data, null, 2));
+                     next(err, instance, resource_records, data);
+                 });
+             } else {
+                 next(err, instance, resource_records, null);
+             }
+         },
+         function allocateHostNumber(instance, resource_records, host_numbers, next) {
+             instance.NR = 1;
+             if (do_individual_entries) {
+                 console.log("Host numbers:");
+                 console.log(JSON.stringify(host_numbers, null, 2));
+                 if (host_numbers.Count !== 0) {
+                     var nr = findRecordByIp(host_numbers.Items, instance.IP);
+                     if (nr < 1)
+                         instance.NR = findFirstAvailable(host_numbers);
+                     var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
+                     dynamoDB.putItem({
+                         TableName: table_name,
+                         Item: {
+                             HostNumber: { N: instance.NR + "" },
+                             IPAddress:  { S: "0" }
+                         }
+                     }, function(err, data) {
+                         if (err) {
+                             console.log("Dynamo DB putItem() returned an error:");
+                             console.log(JSON.stringify(err, null, 2));
+                         }
+                     });
+                 }
+             }
+             console.log("Allocating host number '" + instance.NR + "'");
+             next(null, instance, resource_records);
+         },
          function sortIPs(instance, resource_records, next) {
              var records = resource_records.sort(function(a,b) {
                  return normalizeIP(a.Value) > normalizeIP(b.Value);
              });
              next(null, instance, records);
          },
-         function deallocateHostNumber(instance, resource_records, next) {
-// TODO:
-// Go through the 'host_number' list, look for the IP of the relevant host (which is in the 'resource_records' list).
-//             if (do_individual_entries && asg_event === "autoscaling:EC2_INSTANCE_TERMINATE") {
-//             }
-             instance.NR = 1;
-             next(null, instance, resource_records);
-         },
          function retrieveHostedZones(instance, resource_records, next) {
              console.log("Retrieving hosted zones");
+             console.log("Sorted resource records:");
+             console.log(JSON.stringify(resource_records, null, 2));
+             console.log("Instance information:");
+             console.log(JSON.stringify(instance, null, 2));
              var hosted_zones = route53.listHostedZones({}, function(err, data) {
                  console.log(JSON.stringify(data, null, 2));
                  next(err, instance, resource_records, data);
@@ -408,7 +410,7 @@ exports.handler = function (event, context) {
              }
          },
          function updateHostNumberReservation(instance, next) {
-             if (do_individual_entries) {
+             if (do_individual_entries && (instance.NR >= 1)) {
                  var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
                  if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH") {
                      console.log("Updating DynamoDB table '" + table_name + "' with IP '" + instance.IP + "' for host number '" + instance.NR + "'");
@@ -442,8 +444,8 @@ exports.handler = function (event, context) {
                          }
                      });
                  }
-                 console.log("End of updateHostNumberReservation()");
              }
+             console.log("We've reached the end!");
          }
     ], function (err) {
          if (err) {
