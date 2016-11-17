@@ -4,12 +4,12 @@ var AWS = require('aws-sdk');
 var async = require('async');
 var redis = require('redis');
 
-var region = 'us-east-1';
-//var redis_endpoint = 'redis://elasticache.domain.tld:6379';
+var region = 'eu-west-1';
+var redis_endpoint = 'redis://elasticache.rpharms.net:6379';
 
 var do_round_robin = true;
-var do_individual_entries = false;
-var do_reverse_entry = false;
+var do_individual_entries = true;
+var do_reverse_entry = true;
 var do_debug = false;
 
 /*
@@ -182,8 +182,34 @@ exports.handler = function(event, context) {
          function retrieveInstanceIds(instance, asgResponse, next) {
            var instance_ids;
            if (do_round_robin) {
-             if (asgResponse.AutoScalingGroups[0].Instances.length <= 0)
-               next("No instances in ASG!");
+             if (asgResponse.AutoScalingGroups[0].Instances.length <= 0) {
+                 if (asg_event === "autoscaling:EC2_INSTANCE_TERMINATE") {
+                     console.log("Removing the ElastiCache entry for '" + instance.ID + "'");
+                     redisClient.eval([ 'local id = redis.call("HGET", KEYS[1]..":map", KEYS[2]); redis.call("HDEL", KEYS[1]..":map", KEYS[2]); return redis.call("RPUSH", KEYS[1]..":list", id);',
+                                        2, [ instance.route53Tags.RecordName ], [ instance.ID ] ],
+                                      function(err, data) {
+                         if (err) {
+                             console.log("Redis eval()/del returned error!");
+                             console.dir(err);
+                         } else if (do_debug)
+                             console.log("Redis eval()/del returned data: '" + data + "'");
+                     });
+// TODO: This will leave the reverse and forward DNS entry dangling!
+//       No other way to do it - can't get the IP and therefor can't
+//       create a reverse entry for it and can therefor not find the
+//       zone the reverse IP belongs to and can therefor not remove
+//       the reverse entry.
+//       This doesn't matter for the forward entry because it will
+//       simply be overwritten. For the reverse, the problem isn't
+//       horrible either. Any reverse lookup will be on the IP, so
+//       that will reverse to the correct name. The additional reverse
+//       entries (for host that no longer exists), the IP(s) for those
+//       don't exists either, so it isn't such a big deal that a non
+//       existing IP reverse to an existing host.
+                     next(err, instance, resource_records, 0, data);
+                 }
+                 next("No instances in ASG!");
+             }
              if (do_debug) {
                  console.log("Retrieving Instance ID(s) in ASG");
                  console.log(JSON.stringify(asgResponse.AutoScalingGroups[0].Instances, null, 2));
@@ -235,16 +261,18 @@ exports.handler = function(event, context) {
          function allocateHostNumber(instance, resource_records, next) {
              instance.NR = 0;
              if (do_individual_entries) {
-                 instance.NR = redisClient.eval([ 'local top = redis.call("LPOP", KEYS[1]..":list"); if (top) then else top = redis.call("INCR", KEYS[1]..":counter") end; redis.call("HMSET", KEYS[1]..":map", KEYS[2], top); return top;',
-                                                  2, [ instance.route53Tags.RecordName ], [ instance.IP ] ],
-                                                function(err, data) {
-                     if (err) {
-                         console.log("Redis eval() returned error!");
-                         console.dir(err);
-                     } else if (do_debug)
-                         console.log("Redis eval() returned data: '" + data + "'");
-                     next(err, instance, resource_records, data);
-                 });
+                 if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH") {
+                     instance.NR = redisClient.eval([ 'local top = redis.call("LPOP", KEYS[1]..":list"); if (top) then else top = redis.call("INCR", KEYS[1]..":counter") end; redis.call("HMSET", KEYS[1]..":map", KEYS[2], top); return top;',
+                                                      2, [ instance.route53Tags.RecordName ], [ instance.ID ] ],
+                                                    function(err, data) {
+                         if (err) {
+                             console.log("Redis eval()/add returned error!");
+                             console.dir(err);
+                         } else if (do_debug)
+                             console.log("Redis eval()/add returned data: '" + data + "'");
+                         next(err, instance, resource_records, data);
+                     });
+                 }
              }
          },
          function sortIPs(instance, resource_records, nr, next) {
@@ -331,7 +359,7 @@ exports.handler = function(event, context) {
                  console.log("Records:");
                  console.log(JSON.stringify(records, null, 2));
              }
-// TODO: 'record' is not returned!!
+// TODO: 'record' is not returned - what was it for again!!?
              next(null, instance, resource_records, zone_ids);
          },
          function matchReverseIpsWithReverseIds(instance, resource_records, zone_ids, next) {
@@ -369,10 +397,11 @@ exports.handler = function(event, context) {
                  else
                      fqdn_record = instance.route53Tags.RecordName + cnt;
                  var action = "";
-                 if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH")
-                     action = 'UPSERT';
-                 else
-                     action = 'DELETE';
+// TODO: See retrieveInstanceIds() above.
+//       We need to find any records which points to 'fqdn_record' and
+//       delete that _in addition_ to adding the new entry.
+//                     action = 'DELETE';
+                 action = 'UPSERT';
                  var zone_change = {
                      HostedZoneId: zone_id,
                      ChangeBatch: {
@@ -437,10 +466,7 @@ exports.handler = function(event, context) {
                      record = instance.route53Tags.RecordName + cnt;
                  }
                  var action = "";
-                 if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH")
-                     action = 'UPSERT';
-                 else
-                     action = 'DELETE';
+                 action = 'UPSERT';
                  zone_change.ChangeBatch.Changes.push({
                      Action: action,
                      ResourceRecordSet: {
@@ -467,21 +493,6 @@ exports.handler = function(event, context) {
                      next(err, instance);
                  });
              }
-         },
-         function updateHostNumberReservation(instance, next) {
-             if (do_individual_entries && (instance.NR >= 1) && (asg_event === "autoscaling:EC2_INSTANCE_TERMINATE")) {
-                 redisClient.eval([ 'local id = redis.call("HGET", KEYS[1]..":map", KEYS[2]); redis.call("HDEL", KEYS[1]..":map", KEYS[2]); return redis.call("RPUSH", KEYS[1]..":list", id);',
-                                    2, instance.route53Tags.RecordName, instance.IP
-                                  ], function(err, data) {
-                     if (err) {
-                         console.log("Redis eval() returned error!");
-                         console.dir(err);
-                     } else if (do_debug)
-                         console.log("Redis eval() returned data: '" + data + "'");
-                     next(err, data);
-                 });
-             }
-             context.succeed("We've reached the end!");
          }
     ], function(err) {
          if (err)

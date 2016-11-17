@@ -40,20 +40,22 @@ exports.handler = function (event, context) {
         client.keys(group ? group + ':*' : '*', function (err, keys) {
             if (err) return console.log(err);
 
-            if (keys.length < 1) {
+            if (keys.length < 1)
                 console.log("No existing keys.");
-            } else {
+            else {
                console.log(JSON.stringify(keys, null, 2));
 
-                keys.map(function(key) {
-                    console.log("Trying to delete redis index data for key '" + key + "'");
-                    client.del(key, function(err, reply) {
-                        if (err || (reply === undefined))
-                             console.error("Delete key returned an error: " + reply);
-                        else
-                             console.log("Deleted key successfully");
-                    });
-                });
+                   client.lrange(group + ":list", 0, -1, function (err, replies) {
+                      console.log("list: " + replies);
+                   });
+
+                   client.hgetall(group + ":map", function (err, replies) {
+                      console.log("map: ", replies);
+                   });
+
+                   client.get(group + ":counter", function (err, replies) {
+                      console.log("counter: " + replies);
+                   });
             }
             context.done(err);
         });
