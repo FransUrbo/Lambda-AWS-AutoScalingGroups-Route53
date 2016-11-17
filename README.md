@@ -34,62 +34,37 @@ way, is because I'm working against having ONE record per IP/instance.
 As in, this is now a round-robin entry -> one 'blabla' entry, with
 multiple IP addresses.
 
-I'm hoping to do something like
-
-  ZFBW5S4JKK3LA:www-%index%:example.com
-
-and have one 'www-1' for IP1, a 'www-2' for IP2 etc etc..
-
-I'm not sure if this is possible, but the third option is optional,
-so the original format of this still works.
-
 * Having individual forward and reverse records created
 It is now possible to do unique, individual records created.
 
-This is done using a DynamoDB table, where we store the number(s)
-of allocated numbers.
+That is, instead of just a round-robin entry, we can now have something
+like:
+
+    www-00001.domain.tld. A 10.10.1.13
+    www-00002.domain.tld. A 10.10.1.47
+
+This is done using a ElastiCache/Redis3.2 table, where we store the
+number(s) we're using for the hosts.
 
 This is basically only a _lock_ for making sure that concurrent
 running Lambda functions don't try to reuse the same number.
 
-NOTE: This needs to be tripple checked. I need to verify that the
-      reading/writing to the DB is atomic.
+* Using ElastiCache/Redis3.2 for external number locking
+See `elasticache.tf` for how to create such a table using Terraform.
+The other Terraform files are support for doing this - the Lambda
+function needs to run in a VPC (so that it can access ElastiCache)
+and the ElastiCache is started with one instance in each available
+availability zone for redunancy. It is also configured to automatically
+propagate one of slaves to primary mode if the primary goes down
+(like if Amazon is shutting down the AZ where the primary resides).
 
-See `dynamodb.tf` for how to create such a table using Terraform.
+The key used in the ElastiCache key/value store is prefixed with:
 
-The table name prefix is `autoscaling_event_update_route53-` and
-the next part must match (**exactly**) the second part of the
-`DomainMeta` key.
-
-The `-%index%` part above turned out to be not needed. Instead,
-the _next available number_ taken from the information of the
-DynamoDB table is suffixed to the `RecordName` entry in the
-`DomainMeta` ASG key.
-
-So in the original example at the very top, the `DomainMeta` key
-looked like this:
-
-  ZFBW5S4JKK3LA:www:example.com
-
-That means that the DynamoDB table must be named:
-
-  autoscaling_event_update_route53-www
-
-A new policy was created (and added to the IAM role `ASGNotify`)
-with the name `ASGNotifyPolicy_WRITE_DYNAMODB`.
+    RecordName:
 
 See the file iams.tf for more information on the IAM role and it's
-policies.
-
-NOTE: This require one DynamoDB per ASG!
-
-NOTE: The template for the host name is
-
-    RecordName-XXXXX
-
-So the first entry in our example will be
-
-    www-00001
+policies needed to give this Lambda function only the bare minimum
+it needs to do it's job.
 
 * Enable individual records in the code
 To enable the functionality to create unique, individual records
@@ -103,8 +78,9 @@ and can be used _in addition to_ creating individual records.
 * Debugging
 If the variable `do_debug` is set to **true**, then the actual
 writing to Route53 is disabled. Instead, you get a change request
-that _would_ have been sent to Route53.
+that _would_ have been sent to Route53 as well as more information
+on what's going on in the script.
 
 * Enable creation of reverse DNS entries
-To enable the creation of individual reverse entries in Route53,
+To enable the creation of individual _reverse_ entries in Route53,
 set the variable `do_reverse_entry` to **true**.

@@ -9,9 +9,11 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_READ" {
     {
       "Effect": "Allow",
       "Action": [
-        "ec2:Describe*",
-        "autoscaling:Describe*",
-        "dynamodb:Scan"
+        "ec2:DescribeInstances",
+        "autoscaling:DescribeTags",
+        "autoscaling:DescribeAutoScalingGroups",
+        "route53:ListHostedZones",
+        "route53:ListResourceRecordSets"
       ],
       "Resource": "*"
     }
@@ -33,7 +35,7 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_LOG" {
       "Action": [
         "logs:CreateLogGroup"
       ],
-      "Resource": "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*"
+      "Resource": "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/*"
     },
     {
       "Effect": "Allow",
@@ -41,13 +43,15 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_LOG" {
         "logs:CreateLogStream",
         "logs:PutLogEvents"
       ],
-      "Resource": "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/autoscaling_event:*"
+      "Resource": "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/autoscaling_event_update_route53*"
     }
   ]
 }
 ASG_NOTIFY_POLICY_WRITE_LOG
 }
 
+# => Resource arn:aws:route53:eu-west-1:955935045027:hostedzone/* can not contain region information.
+# => Resource arn:aws:route53::955935045027:hostedzone/* cannot contain an account id.
 resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_R53" {
   name                        = "ASGNotifyPolicy_WRITE_R53"
 
@@ -59,34 +63,34 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_R53" {
     {
       "Effect": "Allow",
       "Action": [
-        "route53:*"
+        "route53:ChangeResourceRecordSets"
       ],
-      "Resource": "*"
+      "Resource": "arn:aws:route53:::hostedzone/*"
     }
   ]
 }
 ASG_NOTIFY_POLICY_WRITE_R53
 }
 
-resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_DYNAMODB" {
-  name                        = "ASGNotifyPolicy_WRITE_DYNAMODB"
+resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_VPC" {
+  name                        = "ASGNotifyPolicy_WRITE_VPC"
 
   role                        = "${aws_iam_role.ASGNotify.id}"
-  policy                      = <<ASG_NOTIFY_POLICY_WRITE_DYNAMODB
+  policy                      = <<ASG_NOTIFY_POLICY_WRITE_VPC
 {
   "Version": "2012-10-17",
   "Statement": [
     {
       "Effect": "Allow",
       "Action": [
-        "dynamodb:PutItem",
-        "dynamodb:UpdateItem"
+        "ec2:CreateNetworkInterface",
+        "ec2:DeleteNetworkInterface"
       ],
-      "Resource": "arn:aws:dynamodb:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:table/autoscaling_event_update_route53-*"
+      "Resource": "*"
     }
   ]
 }
-ASG_NOTIFY_POLICY_WRITE_DYNAMODB
+ASG_NOTIFY_POLICY_WRITE_VPC
 }
 
 resource "aws_iam_role" "ASGNotify" {
@@ -98,8 +102,10 @@ resource "aws_iam_role" "ASGNotify" {
     {
       "Effect": "Allow",
       "Principal": {
-        "Service": "ec2.amazonaws.com",
-        "Service": "lambda.amazonaws.com"
+        "Service": [
+          "ec2.amazonaws.com",
+          "lambda.amazonaws.com"
+        ]
       },
       "Action": "sts:AssumeRole"
     }

@@ -1,7 +1,11 @@
+'use strict';
+
 var AWS = require('aws-sdk');
 var async = require('async');
+var redis = require('redis');
 
 var region = 'us-east-1';
+//var redis_endpoint = 'redis://elasticache.domain.tld:6379';
 
 var do_round_robin = true;
 var do_individual_entries = false;
@@ -65,7 +69,7 @@ function findFirstAvailable(numbers) {
     for(var k in allocated)
         map[allocated[k]] = true;
     for(var i = 1; i < 100000; i++)
-        if(!map[i])
+        if (!map[i])
             return i;
 }
 
@@ -73,27 +77,53 @@ function findRecordByIp(data, ip) {
     var l = data.filter(function(d) {
         return d.IPAddress.S == ip;
     });
-    return l.length == 0 ? 0 : parseInt(l[0].HostNumber.N);
+    return l.length === 0 ? 0 : parseInt(l[0].HostNumber.N);
 }
 
-exports.handler = function (event, context) {
+exports.handler = function(event, context) {
   var asg_msg = JSON.parse(event.Records[0].Sns.Message);
   var asg_name = asg_msg.AutoScalingGroupName;
   var asg_event = asg_msg.Event;
 
-  console.log(asg_event);
+  if (do_debug)
+      console.log(asg_event);
   if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH" || asg_event === "autoscaling:EC2_INSTANCE_TERMINATE") {
     console.log(asg_msg.Description);
 
     var autoscaling = new AWS.AutoScaling({region: region});
     var ec2 = new AWS.EC2({region: region});
-    var route53 = new AWS.Route53();
-    if (do_individual_entries)
-        var dynamoDB = new AWS.DynamoDB({apiVersion: '2012-08-10'});
+    var route53 = new AWS.Route53({region: region});
+
+    if (do_individual_entries) {
+        var redisClient = new redis.createClient(redis_endpoint, {
+            socket_keepalive: false,
+            enable_offline_queue: false,
+            connect_timeout: 2000,
+            retry_strategy: function(options) {
+                if (options.error.code === 'ECONNREFUSED')
+                    return new Error('The server refused the connection');
+                if (options.total_retry_time > 1000 * 2)
+                    return new Error('Retry time exhausted');
+                if (options.times_connected > 5)
+                    return undefined;
+                return Math.min(options.attempt * 50, 100);
+            }
+        });
+        redisClient.on("error", function(err) {
+            if (err) {
+                console.error("Radius client error");
+                context.done(err);
+            }
+        });
+        redisClient.on('end', () => {
+            console.log('Connection closed.');
+        });
+    }
 
     async.waterfall([
          function describeTags(next) {
-           console.log("Retrieving ASG Tags");
+           if (do_debug)
+               console.log("Retrieving ASG Tags");
            autoscaling.describeTags({
                Filters: [
                    {
@@ -111,8 +141,10 @@ exports.handler = function (event, context) {
          function processTags(response, next) {
            var instance = {};
            instance.ID = asg_msg.EC2InstanceId;
-           console.log("Processing ASG Tags");
-           console.log(JSON.stringify(response.Tags, null, 2));
+           if (do_debug) {
+               console.log("Processing ASG Tags");
+               console.log(JSON.stringify(response.Tags, null, 2));
+           }
            if (response.Tags.length === 0)
              return next("ASG: " + asg_name + " does not define Route53 DomainMeta tag.");
            var tokens = response.Tags[0].Value.split(':');
@@ -124,15 +156,23 @@ exports.handler = function (event, context) {
            next(null, instance);
          },
          function retrieveASGInstances(instance, next) {
-           console.log("Route53 tags:");
-           console.log(instance.route53Tags);
+           if (do_debug) {
+               console.log("Route53 tags:");
+               console.log(instance.route53Tags);
+           }
            if (do_round_robin) {
-             console.log("Retrieving Instances in ASG");
+             if (do_debug)
+                 console.log("Retrieving Instances in ASG");
              autoscaling.describeAutoScalingGroups({
                  AutoScalingGroupNames: [asg_name],
                  MaxRecords: 1
              }, function(err, data) {
-                 console.log(JSON.stringify(data, null, 2));
+                 if (err) {
+                     console.error("Failed to describe autoscaling group!");
+                     console.log(err);
+                 }
+                 if (do_debug)
+                     console.log(JSON.stringify(data, null, 2));
                  next(err, instance, data);
              });
            } else {
@@ -144,8 +184,10 @@ exports.handler = function (event, context) {
            if (do_round_robin) {
              if (asgResponse.AutoScalingGroups[0].Instances.length <= 0)
                next("No instances in ASG!");
-             console.log("Retrieving Instance ID(s) in ASG");
-             console.log(JSON.stringify(asgResponse.AutoScalingGroups[0].Instances, null, 2));
+             if (do_debug) {
+                 console.log("Retrieving Instance ID(s) in ASG");
+                 console.log(JSON.stringify(asgResponse.AutoScalingGroups[0].Instances, null, 2));
+             }
              instance_ids = asgResponse.AutoScalingGroups[0].Instances.map(function(inst) {
                return inst.InstanceId;
              });
@@ -155,95 +197,87 @@ exports.handler = function (event, context) {
                DryRun: false,
                InstanceIds: instance_ids
            }, function(err, data) {
+               if (err) {
+                   console.error("Failed to describe instances!");
+                   console.log(err);
+               }
                next(err, instance, data);
            });
          },
          function extractIpAddresses(instance, ec2Response, next) {
-           console.log("Extracting instance(s) IP addresses");
-           console.log(JSON.stringify(ec2Response, null, 2));
+           if (do_debug) {
+               console.log("Extracting instance(s) IP addresses");
+               console.log(JSON.stringify(ec2Response, null, 2));
+           }
            var resource_records = ec2Response.Reservations.map(function(reservation) {
-               var inst = reservation.Instances[0];
-               if (inst.InstanceId == instance.ID)
-                   instance.IP = inst.PublicIpAddress ? inst.PublicIpAddress : inst.PrivateIpAddress;
-               return inst.PublicIpAddress ? {
-                   Value: inst.PublicIpAddress
-               } : {
-                   Value: inst.PrivateIpAddress
-               };
-           }).filter(function(ip) {
-               return ip.Value !== undefined;
+               return reservation.Instances.map(function(inst) {
+                   if (inst.InstanceId == instance.ID) {
+                       instance.IP = inst.PublicIpAddress ? inst.PublicIpAddress : inst.PrivateIpAddress;
+                       console.log("Instance IP address: " + instance.IP);
+                   }
+                   return inst.PublicIpAddress ? {
+                       Value: inst.PublicIpAddress
+                   } : {
+                       Value: inst.PrivateIpAddress
+                   };
+               }).filter(function(ip) {
+                   return ip.Value !== undefined;
+               });
            });
-           console.log("Resource records");
-           console.log(JSON.stringify(resource_records, null, 2));
-           next(null, instance, resource_records);
+           if (do_debug) {
+               console.log("Instance record:");
+               console.log(JSON.stringify(instance, null, 2));
+               console.log("Resource records:");
+               console.log(JSON.stringify(resource_records[0], null, 2));
+           }
+           next(null, instance, resource_records[0]);
          },
-         function retreiveHostNumbers(instance, resource_records, next) {
-             console.log("Instance information");
-             console.log(JSON.stringify(instance, null, 2));
+         function allocateHostNumber(instance, resource_records, next) {
+             instance.NR = 0;
              if (do_individual_entries) {
-                 var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
-                 console.log("Retrieving information from the DynamoDB table '" + table_name + "'");
-                 var existing = dynamoDB.scan({
-                     TableName: table_name
-                 }, function(err, data) {
+                 instance.NR = redisClient.eval([ 'local top = redis.call("LPOP", KEYS[1]..":list"); if (top) then else top = redis.call("INCR", KEYS[1]..":counter") end; redis.call("HMSET", KEYS[1]..":map", KEYS[2], top); return top;',
+                                                  2, [ instance.route53Tags.RecordName ], [ instance.IP ] ],
+                                                function(err, data) {
                      if (err) {
-                         console.log("Dynamo DB scan() returned an error:");
-                         console.log(JSON.stringify(err, null, 2));
-                     } else
-                         console.log(JSON.stringify(data, null, 2));
+                         console.log("Redis eval() returned error!");
+                         console.dir(err);
+                     } else if (do_debug)
+                         console.log("Redis eval() returned data: '" + data + "'");
                      next(err, instance, resource_records, data);
                  });
-             } else {
-                 next(err, instance, resource_records, null);
              }
          },
-         function allocateHostNumber(instance, resource_records, host_numbers, next) {
-             instance.NR = 1;
-             if (do_individual_entries) {
-                 console.log("Host numbers:");
-                 console.log(JSON.stringify(host_numbers, null, 2));
-                 if (host_numbers.Count !== 0) {
-                     var nr = findRecordByIp(host_numbers.Items, instance.IP);
-                     if (nr < 1)
-                         instance.NR = findFirstAvailable(host_numbers);
-                     var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
-                     dynamoDB.putItem({
-                         TableName: table_name,
-                         Item: {
-                             HostNumber: { N: instance.NR + "" },
-                             IPAddress:  { S: "0" }
-                         }
-                     }, function(err, data) {
-                         if (err) {
-                             console.log("Dynamo DB putItem() returned an error:");
-                             console.log(JSON.stringify(err, null, 2));
-                         }
-                     });
-                 }
-             }
-             console.log("Allocating host number '" + instance.NR + "'");
-             next(null, instance, resource_records);
-         },
-         function sortIPs(instance, resource_records, next) {
-             var records = resource_records.sort(function(a,b) {
+         function sortIPs(instance, resource_records, nr, next) {
+             instance.NR = nr;
+             console.log("Allocated host number '" + instance.NR + "'");
+             var records = resource_records.sort(function(a, b) {
                  return normalizeIP(a.Value) > normalizeIP(b.Value);
              });
              next(null, instance, records);
          },
          function retrieveHostedZones(instance, resource_records, next) {
-             console.log("Retrieving hosted zones");
-             console.log("Sorted resource records:");
-             console.log(JSON.stringify(resource_records, null, 2));
-             console.log("Instance information:");
-             console.log(JSON.stringify(instance, null, 2));
+             if (do_debug) {
+                 console.log("Retrieving hosted zones");
+                 console.log("Sorted resource records:");
+                 console.log(JSON.stringify(resource_records, null, 2));
+                 console.log("Instance information:");
+                 console.log(JSON.stringify(instance, null, 2));
+             }
              var hosted_zones = route53.listHostedZones({}, function(err, data) {
-                 console.log(JSON.stringify(data, null, 2));
+                 if (err) {
+                     console.error("Failed to retreive hosted zones!");
+                     console.log(err);
+                 }
+                 if (do_debug)
+                     console.log(JSON.stringify(data, null, 2));
                  next(err, instance, resource_records, data);
              });
          },
          function retrieveZoneIds(instance, resource_records, r53Response, next) {
-             console.log("Hosted zones:");
-             console.log(JSON.stringify(r53Response.HostedZones, null, 2));
+             if (do_debug) {
+                 console.log("Hosted zones:");
+                 console.log(JSON.stringify(r53Response.HostedZones, null, 2));
+             }
              var zone_ids = r53Response.HostedZones.map(function(zone) {
                  return {
                      Id: zone.Id.split("/")[2],
@@ -253,8 +287,10 @@ exports.handler = function (event, context) {
              next(null, instance, resource_records, zone_ids);
          },
          function retrieveZoneRecords(instance, resource_records, zone_ids, next) {
-             console.log("Retrieving zone records for the following zone(s) list");
-             console.log(JSON.stringify(zone_ids, null, 2));
+             if (do_debug) {
+                 console.log("Retrieving zone records for the following zone(s) list:");
+                 console.log(JSON.stringify(zone_ids, null, 2));
+             }
              var promises = [];
              for (var i = 0; i < zone_ids.length; i++) {
                  var promise = route53.listResourceRecordSets({
@@ -269,8 +305,10 @@ exports.handler = function (event, context) {
              });
          },
          function processZoneRecords(instance, resource_records, zone_ids, zone_records, next) {
-             console.log("Processing zone records");
-             console.log(JSON.stringify(zone_records, null, 2));
+             if (do_debug) {
+                 console.log("Processing zone records");
+                 console.log(JSON.stringify(zone_records, null, 2));
+             }
              var records = zone_records.map(function(record) {
                  return {
                      Zone: record.ResourceRecordSets[0].Name,
@@ -281,21 +319,25 @@ exports.handler = function (event, context) {
                              Name: r.Name,
                              Type: r.Type,
                              Values: r.ResourceRecords.map(function(rr) {
-                                 return rr.Value
+                                 return rr.Value;
                              })
-                         }
+                         };
                      })
-                 }
+                 };
              }).filter(function(r) {
                  return r.Records.length >0;
              });
-             console.log("Records:");
-             console.log(JSON.stringify(records, null, 2));
+             if (do_debug) {
+                 console.log("Records:");
+                 console.log(JSON.stringify(records, null, 2));
+             }
 // TODO: 'record' is not returned!!
              next(null, instance, resource_records, zone_ids);
          },
          function matchReverseIpsWithReverseIds(instance, resource_records, zone_ids, next) {
-             reverse_records = [ reverseIP(instance.IP) ];
+             if (!instance.IP)
+                 next(1, instance, resource_records, zone_ids);
+             var reverse_records = [ reverseIP(instance.IP) ];
              var reverse_map = zone_ids.map(function(zone) {
                  var j = {};
                  j[zone.Id] = reverse_records.filter(function(record) {
@@ -315,10 +357,13 @@ exports.handler = function (event, context) {
          },
          function updateDNSReverse(instance, resource_records, reverse_map, next) {
              if (do_reverse_entry && do_individual_entries) {
-                 console.log("Reverse map");
-                 console.log(JSON.stringify(reverse_map, null, 2));
+                 if (do_debug) {
+                     console.log("Reverse map:");
+                     console.log(JSON.stringify(reverse_map, null, 2));
+                 }
                  var zone_id = Object.keys(reverse_map)[0];
                  var cnt = "-" + normalizeNumber(instance.NR + "");
+                 var fqdn_record = "";
                  if (instance.route53Tags.DomainName !== undefined)
                      fqdn_record = instance.route53Tags.RecordName + cnt + "." + instance.route53Tags.DomainName;
                  else
@@ -328,7 +373,7 @@ exports.handler = function (event, context) {
                      action = 'UPSERT';
                  else
                      action = 'DELETE';
-                 zone_change = {
+                 var zone_change = {
                      HostedZoneId: zone_id,
                      ChangeBatch: {
                          Changes: [{
@@ -343,12 +388,22 @@ exports.handler = function (event, context) {
                      }
                  };
                  console.log("Updating Route53 Reverse DNS");
-                 console.log("Zone change request:");
+                 if (do_debug)
+                     console.log("Zone change request:");
                  console.log(JSON.stringify(zone_change, null, 2));
-                 if (!do_debug)
-                     route53.changeResourceRecordSets(zone_change, next);
+                 if (!do_debug) {
+                     route53.changeResourceRecordSets(zone_change, function(err, data) {
+                         console.log("Running changeResourceRecordSets callback (reverse).");
+                         if (err) {
+                             console.error("Failed to update zone records (reverse)!");
+                             console.log(err);
+                         }
+                         if (do_debug)
+                             console.log(JSON.stringify(data, null, 2));
+                         next(err, instance, resource_records);
+                     });
+                 }
              }
-             next(null, instance, resource_records);
          },
          function updateDNSForward(instance, resource_records, next) {
              var record = "";
@@ -362,7 +417,7 @@ exports.handler = function (event, context) {
                  ChangeBatch: {
                      Changes: []
                  }
-             }
+             };
              if (do_round_robin) {
                  zone_change.ChangeBatch.Changes.push({
                      Action: 'UPSERT',
@@ -395,67 +450,46 @@ exports.handler = function (event, context) {
                          ResourceRecords: [ { Value: instance.IP } ]
                      }
                  });
-             };
-             console.log("Updating Route53 Forward DNS");
-             if (do_debug) {
-                 console.log("Debug enabled. Zone change request:");
-                 console.log(JSON.stringify(zone_change, null, 2));
-             } else {
-                 console.log("Zone change request:");
-                 console.log(JSON.stringify(zone_change, null, 2));
-                 route53.changeResourceRecordSets(zone_change, next);
              }
-             if (do_individual_entries) {
-                 next(null, instance, next);
+             console.log("Updating Route53 Forward DNS");
+             if (do_debug)
+                 console.log("Zone change request:");
+             console.log(JSON.stringify(zone_change, null, 2));
+             if (!do_debug) {
+                 route53.changeResourceRecordSets(zone_change, function(err, data) {
+                     console.log("Running changeResourceRecordSets callback (forward).");
+                     if (err) {
+                         console.error("Failed to update zone records (forward)!");
+                         console.log(err);
+                     }
+                     if (do_debug)
+                         console.log(JSON.stringify(data, null, 2));
+                     next(err, instance);
+                 });
              }
          },
          function updateHostNumberReservation(instance, next) {
-             if (do_individual_entries && (instance.NR >= 1)) {
-                 var table_name = "autoscaling_event_update_route53-" + instance.route53Tags.RecordName;
-                 if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH") {
-                     console.log("Updating DynamoDB table '" + table_name + "' with IP '" + instance.IP + "' for host number '" + instance.NR + "'");
-                     dynamoDB.updateItem({
-                         TableName: table_name,
-                         Key: {
-                             HostNumber: { N: instance.NR + "" }
-                         },
-                         UpdateExpression: "set IPAddress = :ip",
-                         ExpressionAttributeValues: {
-                             ":ip": { S: instance.IP }
-                         },
-                         ReturnValues:"UPDATED_NEW"
-                     }, function(err, data) {
-                         if (err) {
-                             console.log("Dynamo DB updateItem() returned an error:");
-                             console.log(JSON.stringify(err, null, 2));
-                         }
-                     });
-                 } else {
-                     console.log("Deleting the host number '" + instance.NR + "' from the DynamoDB table '" + table_name + "'");
-                     dynamoDB.deleteItem({
-                         TableName: table_name,
-                         Key: {
-                             HostNumber: { N: instance.NR + "" }
-                         }
-                     }, function(err, data) {
-                         if (err) {
-                             console.log("Dynamo DB deleteItem() returned an error:");
-                             console.log(JSON.stringify(err, null, 2));
-                         }
-                     });
-                 }
+             if (do_individual_entries && (instance.NR >= 1) && (asg_event === "autoscaling:EC2_INSTANCE_TERMINATE")) {
+                 redisClient.eval([ 'local id = redis.call("HGET", KEYS[1]..":map", KEYS[2]); redis.call("HDEL", KEYS[1]..":map", KEYS[2]); return redis.call("RPUSH", KEYS[1]..":list", id);',
+                                    2, instance.route53Tags.RecordName, instance.IP
+                                  ], function(err, data) {
+                     if (err) {
+                         console.log("Redis eval() returned error!");
+                         console.dir(err);
+                     } else if (do_debug)
+                         console.log("Redis eval() returned data: '" + data + "'");
+                     next(err, data);
+                 });
              }
-             console.log("We've reached the end!");
+             context.succeed("We've reached the end!");
          }
-    ], function (err) {
-         if (err) {
+    ], function(err) {
+         if (err)
             console.error('Failed to process DNS updates for ASG event: ', err);
-         } else {
+         else
             console.log("Successfully processed DNS updates for ASG event.");
-         }
          context.done(err);
     });
-    console.log("End of if(asg_event)");
   } else {
     console.error("Unsupported ASG event: " + asg_name, asg_event);
     context.done("Unsupported ASG event: " + asg_name, asg_event);

@@ -1,0 +1,9 @@
+{
+ "name": "asg_lambda",
+ "version": "0.0.0",
+ "private": true,
+ "dependencies": {
+   "redis": "2.6.3",
+   "async": "2.1.2"
+ }
+}
