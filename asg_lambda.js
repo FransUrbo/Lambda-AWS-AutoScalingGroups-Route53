@@ -422,7 +422,8 @@ exports.handler = function(event, context) {
                  console.log(JSON.stringify(zone_change, null, 2));
                  if (!do_debug) {
                      route53.changeResourceRecordSets(zone_change, function(err, data) {
-                         console.log("Running changeResourceRecordSets callback (reverse).");
+                         if (do_debug)
+                             console.log("Running changeResourceRecordSets callback (reverse).");
                          if (err) {
                              console.error("Failed to update zone records (reverse)!");
                              console.log(err);
@@ -483,7 +484,8 @@ exports.handler = function(event, context) {
              console.log(JSON.stringify(zone_change, null, 2));
              if (!do_debug) {
                  route53.changeResourceRecordSets(zone_change, function(err, data) {
-                     console.log("Running changeResourceRecordSets callback (forward).");
+                     if (do_debug)
+                         console.log("Running changeResourceRecordSets callback (forward).");
                      if (err) {
                          console.error("Failed to update zone records (forward)!");
                          console.log(err);
