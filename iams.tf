@@ -50,6 +50,27 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_LOG" {
 ASG_NOTIFY_POLICY_WRITE_LOG
 }
 
+# Needed to update the Name tag with the individual number.
+resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_EC2" {
+  name                        = "ASGNotifyPolicy_WRITE_EC2"
+
+  role                        = "${aws_iam_role.ASGNotify.id}"
+  policy                      = <<ASG_NOTIFY_POLICY_WRITE_EC2
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags"
+      ],
+      "Resource": "*"
+    }
+  ]
+}
+ASG_NOTIFY_POLICY_WRITE_EC2
+}
+
 # => Resource arn:aws:route53:eu-west-1:955935045027:hostedzone/* can not contain region information.
 # => Resource arn:aws:route53::955935045027:hostedzone/* cannot contain an account id.
 resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_R53" {

@@ -239,6 +239,10 @@ exports.handler = function(event, context) {
                return reservation.Instances.map(function(inst) {
                    if (inst.InstanceId == instance.ID) {
                        instance.IP = inst.PublicIpAddress ? inst.PublicIpAddress : inst.PrivateIpAddress;
+                       instance.Name = inst.Tags[0].map(function(tag) {
+                           if (tag.Key === "Name")
+                               return tag.Value;
+                       });
                        console.log("Instance IP address: " + instance.IP);
                    }
                    return inst.PublicIpAddress ? {
@@ -495,6 +499,16 @@ exports.handler = function(event, context) {
                      next(err, instance);
                  });
              }
+         },
+         function updateNameTag(instance, next) {
+             var cnt = "-" + normalizeNumber(instance.NR + "");
+             ec2.createTags({
+                 Resources: [ instance.ID ],
+                 Tags: [ {
+                     Key: "Name",
+                     Value: instance.Name + cnt
+                  } ]
+              });
          }
     ], function(err) {
          if (err)
