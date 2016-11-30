@@ -206,7 +206,7 @@ exports.handler = function(event, context) {
 //       entries (for host that no longer exists), the IP(s) for those
 //       don't exists either, so it isn't such a big deal that a non
 //       existing IP reverse to an existing host.
-                     next(err, instance, resource_records, 0, data);
+                     next(null, instance, 0);
                  }
                  next("No instances in ASG!");
              }
@@ -239,11 +239,13 @@ exports.handler = function(event, context) {
                return reservation.Instances.map(function(inst) {
                    if (inst.InstanceId == instance.ID) {
                        instance.IP = inst.PublicIpAddress ? inst.PublicIpAddress : inst.PrivateIpAddress;
-                       instance.Name = inst.Tags[0].map(function(tag) {
+                       instance.Name = inst.Tags.map(function(tag) {
                            if (tag.Key === "Name")
                                return tag.Value;
+                       }).filter(function(value) {
+                         return value !== undefined;
                        });
-                       console.log("Instance IP address: " + instance.IP);
+                       console.log("Instance IP address: " + instance.IP + " (name: " + instance.Name + ")");
                    }
                    return inst.PublicIpAddress ? {
                        Value: inst.PublicIpAddress
@@ -502,12 +504,23 @@ exports.handler = function(event, context) {
          },
          function updateNameTag(instance, next) {
              var cnt = "-" + normalizeNumber(instance.NR + "");
+             console.log("Updating Name tag to '" + instance.Name + cnt + "'");
              ec2.createTags({
                  Resources: [ instance.ID ],
                  Tags: [ {
                      Key: "Name",
                      Value: instance.Name + cnt
                   } ]
+              }, function(err, data) {
+                     if (do_debug)
+                         console.log("Running updateNameTag callback.");
+                     if (err) {
+                         console.error("Failed to update instance Name tag!");
+                         console.log(err);
+                     }
+                     if (do_debug)
+                         console.log(JSON.stringify(data, null, 2));
+                     next(err, instance);
               });
          }
     ], function(err) {
