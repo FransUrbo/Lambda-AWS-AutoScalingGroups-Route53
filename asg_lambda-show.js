@@ -29,7 +29,7 @@ exports.handler = function (event, context) {
         context.done(err);
     });
 
-    client.on('end', () => {
+    client.on('end', function() {
         console.log('Connection closed.');
     });
 
@@ -40,24 +40,48 @@ exports.handler = function (event, context) {
         client.keys(group ? group + ':*' : '*', function (err, keys) {
             if (err) return console.log(err);
 
-            if (keys.length < 1)
+            if (keys.length < 1) {
                 console.log("No existing keys.");
-            else {
-               console.log(JSON.stringify(keys, null, 2));
-
-                   client.lrange(group + ":list", 0, -1, function (err, replies) {
-                      console.log("list: " + replies);
-                   });
-
-                   client.hgetall(group + ":map", function (err, replies) {
-                      console.log("map: ", replies);
-                   });
-
-                   client.get(group + ":counter", function (err, replies) {
-                      console.log("counter: " + replies);
-                   });
             }
-            context.done(err);
+            else {
+                console.log(JSON.stringify(keys, null, 2));
+
+                var listPromise = new Promise(function(resolve, reject) {
+                    client.lrange(group + ":list", 0, -1, function (err, replies) {
+                        if (err) {
+                            console.log("list error: " + err);
+                            reject(err);
+                        }
+                        console.log("list: " + replies);
+                        resolve();
+                    });
+                });
+
+                var mapPromise = new Promise(function(resolve, reject) {
+                    client.hgetall(group + ":map", function (err, replies) {
+                        if (err) {
+                            console.log("map error: " + err);
+                            reject(err);
+                        }
+                        console.log("map: ", replies);
+                        resolve();
+                    });
+                });
+
+                var counterPromise = new Promise(function(resolve, reject) {
+                    client.get(group + ":counter", function (err, replies) {
+                        if (err) {
+                            console.log("counter error: " + err);
+                            reject(err);
+                        }
+                        console.log("counter: " + replies);
+                        resolve();
+                    });
+                });
+            }
+            Promise.all([listPromise, mapPromise, counterPromise]).then(function() {
+                context.done(err);
+            });
         });
     });
 };
