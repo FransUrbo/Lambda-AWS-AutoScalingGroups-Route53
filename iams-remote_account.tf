@@ -14,11 +14,7 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_READ" {
         "autoscaling:DescribeTags",
         "autoscaling:DescribeAutoScalingGroups",
         "route53:ListHostedZones",
-        "route53:ListResourceRecordSets",
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:GetLogEvents",
-        "logs:FilterLogEvents"
+        "route53:ListResourceRecordSets"
       ],
       "Resource": "*"
     }
@@ -27,76 +23,8 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_READ" {
 ASG_NOTIFY_POLICY_READ
 }
 
-# Allow `ASGNotify` to assume the `ASGNotify` role in Validation
-resource "aws_iam_role_policy" "ASGNotifyPolicy_ASSUME_ROLE_REMOTE_ACCOUNT" {
-  name                        = "ASGNotifyPolicy_ASSUME_ROLE_REMOTE_ACCOUNT"
-
-  role                        = "${aws_iam_role.ASGNotify.id}"
-  policy                      = <<ASG_NOTIFY_POLICY_ASSUME_ROLE_REMOTE_ACCOUNT
-{
-  "Version": "2012-10-17",
-  "Statement": {
-    "Effect": "Allow",
-    "Action": "sts:AssumeRole",
-    "Resource": [
-        "arn:aws:iam::<REMOTE_ACCOUNT_ID>:role/ASGNotify"
-    ]
-  }
-}
-ASG_NOTIFY_POLICY_ASSUME_ROLE_REMOTE_ACCOUNT
-}
-
-resource "aws_iam_role_policy" "ASGNotifyPolicy_DECRYPT" {
-  name                        = "ASGNotifyPolicy_DECRYPT"
-
-  role                        = "${aws_iam_role.ASGNotify.id}"
-  policy                      = <<ASG_NOTIFY_POLICY_DECRYPT
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "kms:Decrypt"
-      ],
-      "Resource": "${aws_kms_key.lambda-slack.arn}"
-    }
-  ]
-}
-ASG_NOTIFY_POLICY_DECRYPT
-}
-
-resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_LOG" {
-  name                        = "ASGNotifyPolicy_WRITE_LOG"
-
-  role                        = "${aws_iam_role.ASGNotify.id}"
-  policy                      = <<ASG_NOTIFY_POLICY_WRITE_LOG
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream"
-      ],
-      "Resource": "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": [
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
-      ],
-      "Resource": "arn:aws:logs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:log-group:/aws/lambda/autoscaling_event_update_route53*"
-    }
-  ]
-}
-ASG_NOTIFY_POLICY_WRITE_LOG
-}
-
-# => Resource arn:aws:route53:eu-west-1:<LOCAL_ACCOUNT_ID>:hostedzone/* can not contain region information.
-# => Resource arn:aws:route53::<LOCAL_ACCOUNT_ID>:hostedzone/* cannot contain an account id.
+# => Resource arn:aws:route53:eu-west-1:<ORIGIN_ACCOUNT_ID>:hostedzone/* can not contain region information.
+# => Resource arn:aws:route53::<ORIGIN_ACCOUNT_ID>:hostedzone/* cannot contain an account id.
 resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_R53" {
   name                        = "ASGNotifyPolicy_WRITE_R53"
 
@@ -117,7 +45,6 @@ resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_R53" {
 ASG_NOTIFY_POLICY_WRITE_R53
 }
 
-# Needed to update the Name tag with the individual number.
 resource "aws_iam_role_policy" "ASGNotifyPolicy_WRITE_EC2" {
   name                        = "ASGNotifyPolicy_WRITE_EC2"
 
@@ -176,6 +103,13 @@ resource "aws_iam_role" "ASGNotify" {
           "apigateway.amazonaws.com"
         ]
       }
+    },
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::<ORIGIN_ACCOUNT_ID>:role/ASGNotify"
+      },
+      "Action": "sts:AssumeRole"
     }
   ]
 }

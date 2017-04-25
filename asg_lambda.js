@@ -14,6 +14,19 @@ var do_reverse_entry = true;
 var do_debug = false;
 
 /*
+ * If this Lambda function is called from ASG events from another
+ * account, it will try to assume this defined role.
+ *
+ * The role ARN will be constructed as:
+ *
+ *   "arn:aws:iam:<remote_region>:<remote_account_id>:role/<remote_role>"
+ *
+ * The `remote_region` and `remote_account_id` will be retrieved from the
+ * SNS event message.
+ */
+var remote_role = 'ASGNotify';
+
+/*
  * Flow:
  * Get tags from ASG
  * Process tags retreived
@@ -86,16 +99,20 @@ exports.handler = function (event, context) {
     var asg_name = asg_msg.AutoScalingGroupName;
     var asg_event = asg_msg.Event;
 
-    if (do_debug) {
-        console.log(asg_event);
-        console.log(JSON.stringify(event, null, 2));
-    }
-    if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH" || asg_event === "autoscaling:EC2_INSTANCE_TERMINATE") {
-        console.log(asg_msg.Description);
+    /* Get the account ID of the SNS event topic - the "source" account */
+    var src_account = event.Records[0].EventSubscriptionArn.split(':')[4];
 
-        var autoscaling = new AWS.AutoScaling({region: region});
-        var ec2 = new AWS.EC2({region: region});
-        var route53 = new AWS.Route53({region: region});
+    /* Get the account ID of the SNS message sender - the "remote" account */
+    var rem_account = asg_msg.AccountId;
+    var rem_region = asg_msg.AutoScalingGroupARN.split(':')[3];
+
+    if (do_debug) {
+        console.log("Source account ID: '" + src_account + "', Remote account ID: '" + rem_account + "' (Region: '" + rem_region+ " ')");
+        console.log("Event details: '" + JSON.stringify(event, null, 2) + "'");
+    }
+
+    if (asg_event === "autoscaling:EC2_INSTANCE_LAUNCH" || asg_event === "autoscaling:EC2_INSTANCE_TERMINATE") {
+        console.log("ASG message description: '" + asg_msg.Description + "'");
 
         if (do_individual_entries) {
             var redisClient = new redis.createClient(redis_endpoint, {
@@ -127,7 +144,69 @@ exports.handler = function (event, context) {
             });
         }
 
+        /* These are global variables initiated in authenticate() below */
+        var autoscaling, ec2, route53;
+
         async.waterfall([
+            function assumeRemoteRole(next) {
+                /* If these don't match, assume the 'XXX' role in the remote account */
+                if ((src_account != rem_account) && remote_role) {
+                    var sts = new AWS.STS({region: rem_region});
+
+                    var roleSessionName = src_account + "-" + rem_account;
+                    var roleArn = "arn:aws:iam::" + rem_account + ":role/" + remote_role;
+
+                    if (do_debug) {
+                        console.log("Session name: '" + roleSessionName + "'");
+                        console.log("Assuming role '" + roleArn + "'");
+                    }
+
+                    sts.assumeRole({
+                        DurationSeconds: 1000,
+                        ExternalId: "123ABC",
+                        RoleSessionName: roleSessionName,
+                        RoleArn: roleArn
+                    }, function(err, data) {
+                        if (err) {
+                            console.log("Could not assume role '" + roleArn + "'");
+                            console.log(err, err.stack);
+                        }
+                        next(null, data);
+                    });
+                } else {
+                    next();
+                }
+            },
+            function extractCredentials(response, next) {
+                if (do_debug) {
+                    console.log("Response from assumeRole():");
+                    console.log(JSON.stringify(response, null, 2));
+                }
+                var credentials = {
+                    access_key: response.Credentials.AccessKeyId,
+                    secret_key: response.Credentials.SecretAccessKey,
+                    session_token: response.Credentials.SessionToken
+                };
+                next(null, credentials);
+            },
+            function authenticate(credentials, next) {
+                if (do_debug) {
+                    console.log("Credentials to use when connecting to AWS:");
+                    console.log(JSON.stringify(credentials, null, 2));
+                }
+                var request = {
+                    region: region,
+                    accessKeyId: credentials.access_key,
+                    secretAccessKey: credentials.secret_key,
+                    sessionToken: credentials.session_token
+                };
+
+                autoscaling = new AWS.AutoScaling(request);
+                ec2 = new AWS.EC2(request);
+                route53 = new AWS.Route53(request);
+
+                next();
+            },
             function describeTags(next) {
                 if (do_debug) {
                     console.log("Retrieving ASG Tags");
@@ -485,6 +564,15 @@ exports.handler = function (event, context) {
                         next(err, instance, resource_records);
                     });
                 }
+            },
+            function deactivateRemoteRoleForRoute53(instance, resource_records, next) {
+                if ((src_account != rem_account) && remote_role) {
+                    /* We now revert to using route53 for the current (core) account, as the remote account doesn't
+                    have permission to edit the Forward DNS. */
+                    route53 = new AWS.Route53({region: region});
+                }
+
+                next(null, instance, resource_records);
             },
             function updateDNSForward(instance, resource_records, next) {
                 var record = "";

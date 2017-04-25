@@ -84,6 +84,33 @@ See the file iams.tf for more information on the IAM role and it's
 policies needed to give this Lambda function only the bare minimum
 it needs to do it's job.
 
+### Multi-account support
+As of 25 Apr 2017, this function now supports multiple accounts.
+
+This means, that it's now possible to run the Lambda function
+in one account and have it read and update Route53 (reverse zones)
+and Name tags on hosts in another account.
+
+This is done by the 'local' (as in, the account where the Lambda
+funcion is running) account role the Lambda function is running
+under (see `lambda.tf` - the `ASGNotify` role defined in `iams.tf`)
+assuming a role in the remote account (which then have access to
+the relevant resource in the that account).
+
+To do this, the 'local' account needs to have the IAM role and
+it's policies from the `iams.tf` file and the remote account
+needs the corresponding role and policies from the `iams-remote_account.tf`
+file.
+
+In this case, this role is called *ASGNotify* in both accounts
+(just to make things slightly less complicated).
+
+But this can be specified at the top of the `asg_lambda.js` file.
+
+In addition to this, the SNS topic will need to provide access
+to publish to it. This is done by specifying the remote account
+ID(s) in it's policy (see the `sns.tf` file).
+
 ## Debugging
 If the variable `do_debug` is set to **true**, then the actual
 writing to Route53 is disabled. Instead, you get a change request
