@@ -174,32 +174,43 @@ exports.handler = function (event, context) {
                         next(null, data);
                     });
                 } else {
-                    next();
+                    next(null, null);
                 }
             },
             function extractCredentials(response, next) {
-                if (do_debug) {
-                    console.log("Response from assumeRole():");
-                    console.log(JSON.stringify(response, null, 2));
+                if ((src_account != rem_account) && remote_role) {
+                    if (do_debug) {
+                        console.log("Response from assumeRole():");
+                        console.log(JSON.stringify(response, null, 2));
+                    }
+                    var remoteCredentials = {
+                        access_key: response.Credentials.AccessKeyId,
+                        secret_key: response.Credentials.SecretAccessKey,
+                        session_token: response.Credentials.SessionToken
+                    };
+                    next(null, remoteCredentials);
+                } else {
+                    next(null, null);
                 }
-                var credentials = {
-                    access_key: response.Credentials.AccessKeyId,
-                    secret_key: response.Credentials.SecretAccessKey,
-                    session_token: response.Credentials.SessionToken
-                };
-                next(null, credentials);
             },
             function authenticate(credentials, next) {
-                if (do_debug) {
-                    console.log("Credentials to use when connecting to AWS:");
-                    console.log(JSON.stringify(credentials, null, 2));
+                var request;
+                if ((src_account != rem_account) && remote_role) {
+                    if (do_debug) {
+                        console.log("Credentials to use when connecting to AWS:");
+                        console.log(JSON.stringify(credentials, null, 2));
+                    }
+                    request = {
+                        region: region,
+                        accessKeyId: credentials.access_key,
+                        secretAccessKey: credentials.secret_key,
+                        sessionToken: credentials.session_token
+                    };
+                } else {
+                    request = {
+                        region: region
+                    };
                 }
-                var request = {
-                    region: region,
-                    accessKeyId: credentials.access_key,
-                    secretAccessKey: credentials.secret_key,
-                    sessionToken: credentials.session_token
-                };
 
                 autoscaling = new AWS.AutoScaling(request);
                 ec2 = new AWS.EC2(request);
@@ -568,7 +579,7 @@ exports.handler = function (event, context) {
             function deactivateRemoteRoleForRoute53(instance, resource_records, next) {
                 if ((src_account != rem_account) && remote_role) {
                     /* We now revert to using route53 for the current (core) account, as the remote account doesn't
-                    have permission to edit the Forward DNS. */
+                     have permission to edit the Forward DNS. */
                     route53 = new AWS.Route53({region: region});
                 }
 
