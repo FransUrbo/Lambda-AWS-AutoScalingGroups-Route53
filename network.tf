@@ -29,7 +29,7 @@ resource "aws_subnet" "main_0" {
   availability_zone           = "${data.aws_availability_zones.available.names[0]}"
   map_public_ip_on_launch     = "true"
 
-  depends_on                  = ["aws_internet_gateway.main"]
+  depends_on                  = [aws_internet_gateway.main]
 
   tags {
     Name                      = "core-main_0"

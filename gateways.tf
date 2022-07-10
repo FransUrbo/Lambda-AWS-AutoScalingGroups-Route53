@@ -17,7 +17,7 @@ resource "aws_eip" "main-nat" {
 resource "aws_nat_gateway" "main" {
   allocation_id          = "${aws_eip.main-nat.id}"
   subnet_id              = "${aws_subnet.main_public.id}"
-  depends_on             = ["aws_internet_gateway.main"]
+  depends_on             = [aws_internet_gateway.main]
 }
 
 resource "aws_route" "main" {
